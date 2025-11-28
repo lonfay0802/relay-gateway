@@ -156,7 +156,12 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	}
 
 	var httpResp *http.Response
+	fmt.Println("========================================")
+	fmt.Println("API 网关测试脚本 (Go版本)")
+	startTime := time.Now()
 	resp, err := adaptor.DoRequest(c, info, requestBody)
+	duration := time.Since(startTime)
+	fmt.Printf("⏱️  请求耗时: %dms\n", duration.Milliseconds())
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
