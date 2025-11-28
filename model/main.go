@@ -110,7 +110,7 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, error) {
 				DSN:                  dsn,
 				PreferSimpleProtocol: true, // disables implicit prepared statement usage
 			}), &gorm.Config{
-				PrepareStmt: true, // precompile SQL
+				PrepareStmt: false, // disable prepared statements for connection pooling compatibility
 			})
 		}
 		if strings.HasPrefix(dsn, "local") {
