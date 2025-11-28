@@ -32,10 +32,18 @@ func InitRedisClient() (err error) {
 		SyncFrequency = 60
 	}
 	SysLog("Redis is enabled")
-	opt, err := redis.ParseURL(os.Getenv("REDIS_CONN_STRING"))
+	connString := os.Getenv("REDIS_CONN_STRING")
+	SysLog(fmt.Sprintf("Attempting to connect to Redis with connection string: %s", connString))
+
+	opt, err := redis.ParseURL(connString)
 	if err != nil {
 		FatalLog("failed to parse Redis connection string: " + err.Error())
 	}
+
+	// 输出解析后的连接参数（隐藏密码）
+	SysLog(fmt.Sprintf("Parsed Redis options - Addr: %s, DB: %d, Username: '%s', Password length: %d",
+		opt.Addr, opt.DB, opt.Username, len(opt.Password)))
+
 	opt.PoolSize = GetEnvOrDefault("REDIS_POOL_SIZE", 10)
 	RDB = redis.NewClient(opt)
 
