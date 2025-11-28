@@ -64,6 +64,9 @@ func ResetProxyClientCache() {
 
 // NewProxyHttpClient 创建支持代理的 HTTP 客户端
 func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
+	fmt.Println("========================================")
+	fmt.Println("API 网关测试脚本 (Go版本)")
+	startTime := time.Now()
 	if proxyURL == "" {
 		return http.DefaultClient, nil
 	}
@@ -92,6 +95,8 @@ func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
 		proxyClientLock.Lock()
 		proxyClients[proxyURL] = client
 		proxyClientLock.Unlock()
+		duration := time.Since(startTime)
+		fmt.Printf("⏱️  请求耗时: %dms\n", duration.Milliseconds())
 		return client, nil
 
 	case "socks5", "socks5h":
