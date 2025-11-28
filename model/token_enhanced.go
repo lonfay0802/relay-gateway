@@ -191,10 +191,40 @@ func (token *TokenEnhanced) SelectUpdate() (err error) {
 
 // GetTokenEnhancedByKey 根据 key 获取 TokenEnhanced
 func GetTokenEnhancedByKey(key string, fromDB bool) (token *TokenEnhanced, err error) {
-	// TODO: 可以添加 Redis 缓存支持，类似 GetTokenByKey
+	// 如果启用Redis且不强制从数据库读取，先尝试从缓存获取
+	fmt.Printf("cache_enable状态： %t\n", common.RedisEnabled)
+	if common.RedisEnabled && !fromDB {
+		hmacKey := common.GenerateHMAC(key)
+		cacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+
+		token = &TokenEnhanced{}
+		err := common.RedisHGetObj(cacheKey, token)
+		if err == nil {
+			// 从缓存成功读取，恢复原始key
+			token.Key = key
+			return token, nil
+		}
+		// 缓存未命中，继续从数据库读取
+	}
+
+	// 从数据库读取
 	token = &TokenEnhanced{}
 	err = DB.Where("key = ? AND deleted = ? AND status = ?", key, 0, 1).First(token).Error
-	return token, err
+	if err != nil {
+		return nil, err
+	}
+
+	// 写入Redis缓存
+	if common.RedisEnabled {
+		hmacKey := common.GenerateHMAC(key)
+		cacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+		// 缓存token副本（不包含敏感key）
+		tokenCopy := *token
+		tokenCopy.Key = "" // 不缓存明文key
+		_ = common.RedisHSetObj(cacheKey, &tokenCopy, time.Duration(common.RedisKeyCacheSeconds())*time.Second)
+	}
+
+	return token, nil
 }
 
 // ValidateUserTokenEnhanced 验证用户 token（TokenEnhanced 版本）
@@ -282,4 +312,46 @@ func (token *TokenEnhanced) GetModelLimitsMap() map[string]bool {
 		limitsMap[limit] = true
 	}
 	return limitsMap
+}
+
+// ========== Redis 缓存辅助函数 ==========
+
+// CacheSetTokenEnhanced 将 TokenEnhanced 写入 Redis 缓存
+func CacheSetTokenEnhanced(token *TokenEnhanced) error {
+	if !common.RedisEnabled || token == nil {
+		return nil
+	}
+	hmacKey := common.GenerateHMAC(token.Key)
+	cacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+
+	// 缓存token副本（不包含敏感key）
+	tokenCopy := *token
+	tokenCopy.Key = "" // 不缓存明文key
+
+	return common.RedisHSetObj(cacheKey, &tokenCopy, time.Duration(common.RedisKeyCacheSeconds())*time.Second)
+}
+
+// CacheDeleteTokenEnhanced 从 Redis 缓存删除 TokenEnhanced
+func CacheDeleteTokenEnhanced(key string) error {
+	if !common.RedisEnabled {
+		return nil
+	}
+	hmacKey := common.GenerateHMAC(key)
+	cacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+	return common.RedisDelKey(cacheKey)
+}
+
+// CacheUpdateTokenEnhancedQuota 更新 Redis 缓存中的 Token 配额
+func CacheUpdateTokenEnhancedQuota(key string, remainQuota int, usedQuota int) error {
+	if !common.RedisEnabled {
+		return nil
+	}
+	hmacKey := common.GenerateHMAC(key)
+	cacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+
+	// 更新两个字段
+	if err := common.RedisHSetField(cacheKey, "RemainQuota", fmt.Sprintf("%d", remainQuota)); err != nil {
+		return err
+	}
+	return common.RedisHSetField(cacheKey, "UsedQuota", fmt.Sprintf("%d", usedQuota))
 }
