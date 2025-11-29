@@ -7,4 +7,5 @@ import (
 func SetRouter(router *gin.Engine) {
 	SetRelayRouter(router)
 	SetVideoRouter(router)
+	SetAdminRouter(router)
 }

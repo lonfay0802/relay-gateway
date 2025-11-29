@@ -154,14 +154,11 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 
 		requestBody = bytes.NewBuffer(jsonData)
 	}
-
+	var startTime = time.Now()
 	var httpResp *http.Response
-	fmt.Println("========================================")
-	fmt.Println("API 网关测试脚本 (Go版本)")
-	startTime := time.Now()
 	resp, err := adaptor.DoRequest(c, info, requestBody)
-	duration := time.Since(startTime)
-	fmt.Printf("⏱️  请求耗时: %dms\n", duration.Milliseconds())
+	elapsed := time.Since(startTime)
+	fmt.Printf("请求耗时================：%s\n", elapsed)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
@@ -178,7 +175,6 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			return newApiErr
 		}
 	}
-
 	usage, newApiErr := adaptor.DoResponse(c, httpResp, info)
 	if newApiErr != nil {
 		// reset status code 重置状态码
@@ -186,11 +182,19 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		return newApiErr
 	}
 
-	if strings.HasPrefix(info.OriginModelName, "gpt-4o-audio") {
-		service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), "")
-	} else {
-		postConsumeQuota(c, info, usage.(*dto.Usage), "")
-	}
+	// 异步执行补扣费操作，避免阻塞响应返回
+	usageCopy := usage.(*dto.Usage)
+	infoCopy := info
+	ctx := c.Copy()
+
+	common.RelayCtxGo(c.Request.Context(), func() {
+		if strings.HasPrefix(infoCopy.OriginModelName, "gpt-4o-audio") {
+			service.PostAudioConsumeQuota(ctx, infoCopy, usageCopy, "")
+		} else {
+			postConsumeQuota(ctx, infoCopy, usageCopy, "")
+		}
+	})
+
 	return nil
 }
 
@@ -493,7 +497,8 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 		errorMessage = "可能是上游超时"
 	}
 
-	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
+	// 异步记录日志，避免阻塞响应返回
+	logParams := model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
@@ -512,5 +517,11 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 		Success:      success,
 		ErrorMessage: errorMessage,
 		PriceData:    &relayInfo.PriceData, // 传递价格数据用于计算cost_cents
+	}
+	userId := relayInfo.UserId
+
+	// 使用 gopool 异步记录日志
+	common.RelayCtxGo(ctx.Request.Context(), func() {
+		model.RecordConsumeLog(ctx, userId, logParams)
 	})
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"relay-gateway/common"
 	"relay-gateway/constant"
@@ -133,6 +134,7 @@ func TryUserAuth() func(c *gin.Context) {
 
 func TokenAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
+		var startTime = time.Now()
 		// 先检测是否为ws
 		if c.Request.Header.Get("Sec-WebSocket-Protocol") != "" {
 			// Sec-WebSocket-Protocol: realtime, openai-insecure-api-key.sk-xxx, openai-beta.realtime-v1
@@ -183,7 +185,10 @@ func TokenAuth() func(c *gin.Context) {
 			//parts = strings.Split(key, "-")
 			//key = parts[0]
 		}
+		var startTimeGetToken = time.Now()
 		token, err := model.ValidateUserTokenEnhanced(key)
+		elapsed3 := time.Since(startTimeGetToken)
+		fmt.Printf("ValidateUserTokenEnhanced耗时================：%s\n", elapsed3)
 		if token != nil {
 			id := c.GetString("id")
 			if id == "" {
@@ -203,8 +208,10 @@ func TokenAuth() func(c *gin.Context) {
 				return
 			}
 		}
-
+		var userTime = time.Now()
 		userCache, err := model.GetUserCache(token.UserId)
+		elapsed2 := time.Since(userTime)
+		fmt.Printf("GetUserCache耗时================：%s\n", elapsed2)
 		if err != nil {
 			abortWithOpenAiMessage(c, http.StatusInternalServerError, err.Error())
 			return
@@ -235,7 +242,8 @@ func TokenAuth() func(c *gin.Context) {
 			userGroup = tokenGroup
 		}
 		common.SetContextKey(c, constant.ContextKeyUsingGroup, userGroup)
-
+		elapsed := time.Since(startTime)
+		fmt.Printf("请求耗时Token================：%s\n", elapsed)
 		err = SetupContextForToken(c, token, parts...)
 		if err != nil {
 			return

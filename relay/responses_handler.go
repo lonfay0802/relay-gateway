@@ -104,10 +104,18 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		return newAPIError
 	}
 
-	if strings.HasPrefix(info.OriginModelName, "gpt-4o-audio") {
-		service.PostAudioConsumeQuota(c, info, usage.(*dto.Usage), "")
-	} else {
-		postConsumeQuota(c, info, usage.(*dto.Usage), "")
-	}
+	// 异步执行补扣费操作，避免阻塞响应返回
+	usageCopy := usage.(*dto.Usage)
+	infoCopy := info
+	ctx := c.Copy()
+
+	common.RelayCtxGo(c.Request.Context(), func() {
+		if strings.HasPrefix(infoCopy.OriginModelName, "gpt-4o-audio") {
+			service.PostAudioConsumeQuota(ctx, infoCopy, usageCopy, "")
+		} else {
+			postConsumeQuota(ctx, infoCopy, usageCopy, "")
+		}
+	})
+
 	return nil
 }

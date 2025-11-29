@@ -3,6 +3,7 @@ package relay
 import (
 	"fmt"
 
+	"relay-gateway/common"
 	"relay-gateway/dto"
 	relaycommon "relay-gateway/relay/common"
 	"relay-gateway/service"
@@ -41,6 +42,16 @@ func WssHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
-	service.PostWssConsumeQuota(c, info, info.UpstreamModelName, usage.(*dto.RealtimeUsage), "")
+
+	// 异步执行补扣费操作，避免阻塞响应返回
+	usageCopy := usage.(*dto.RealtimeUsage)
+	infoCopy := info
+	modelName := info.UpstreamModelName
+	ctx := c.Copy()
+
+	common.RelayCtxGo(c.Request.Context(), func() {
+		service.PostWssConsumeQuota(ctx, infoCopy, modelName, usageCopy, "")
+	})
+
 	return nil
 }

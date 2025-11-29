@@ -130,6 +130,14 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		logContent = fmt.Sprintf("大小 %s, 品质 %s, 张数 %d", request.Size, quality, request.N)
 	}
 
-	postConsumeQuota(c, info, usage.(*dto.Usage), logContent)
+	// 异步执行补扣费操作，避免阻塞响应返回
+	usageCopy := usage.(*dto.Usage)
+	infoCopy := info
+	ctx := c.Copy()
+
+	common.RelayCtxGo(c.Request.Context(), func() {
+		postConsumeQuota(ctx, infoCopy, usageCopy, logContent)
+	})
+
 	return nil
 }

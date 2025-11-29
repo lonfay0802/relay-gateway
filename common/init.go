@@ -82,7 +82,7 @@ func InitEnv() {
 	RequestInterval = time.Duration(requestInterval) * time.Second
 
 	// Initialize variables with GetEnvOrDefault
-	SyncFrequency = GetEnvOrDefault("SYNC_FREQUENCY", 60)
+	SyncFrequency = GetEnvOrDefault("SYNC_FREQUENCY", 3600)
 	BatchUpdateInterval = GetEnvOrDefault("BATCH_UPDATE_INTERVAL", 5)
 	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0)
 

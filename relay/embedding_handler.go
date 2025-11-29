@@ -74,6 +74,15 @@ func EmbeddingHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
-	postConsumeQuota(c, info, usage.(*dto.Usage), "")
+
+	// 异步执行补扣费操作，避免阻塞响应返回
+	usageCopy := usage.(*dto.Usage)
+	infoCopy := info
+	ctx := c.Copy()
+
+	common.RelayCtxGo(c.Request.Context(), func() {
+		postConsumeQuota(ctx, infoCopy, usageCopy, "")
+	})
+
 	return nil
 }

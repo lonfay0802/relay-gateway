@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -113,6 +114,7 @@ func RedisDelKey(key string) error {
 }
 
 func RedisHSetObj(key string, obj interface{}, expiration time.Duration) error {
+	SysLog(fmt.Sprintf("Redis HSET: key=%s, obj=%+v, expiration=%v", key, obj, expiration))
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis HSET: key=%s, obj=%+v, expiration=%v", key, obj, expiration))
 	}
@@ -139,6 +141,13 @@ func RedisHSetObj(key string, obj interface{}, expiration time.Duration) error {
 				continue
 			}
 			value = value.Elem()
+		}
+
+		// 处理 time.Time 类型（使用 RFC3339 格式）
+		if value.Type().String() == "time.Time" {
+			timeVal := value.Interface().(time.Time)
+			data[field.Name] = timeVal.Format(time.RFC3339Nano)
+			continue
 		}
 
 		// 处理布尔类型
@@ -227,8 +236,21 @@ func RedisHGetObj(key string, obj interface{}) error {
 				}
 				fieldValue.SetBool(boolValue)
 			case reflect.Struct:
-				// Special handling for gorm.DeletedAt
-				if fieldValue.Type().String() == "gorm.DeletedAt" {
+				// Special handling for time.Time
+				if fieldValue.Type().String() == "time.Time" {
+					if value != "" {
+						timeValue, err := time.Parse(time.RFC3339Nano, value)
+						if err != nil {
+							// 尝试使用 RFC3339 格式
+							timeValue, err = time.Parse(time.RFC3339, value)
+							if err != nil {
+								return fmt.Errorf("failed to parse time.Time field %s: %w", fieldName, err)
+							}
+						}
+						fieldValue.Set(reflect.ValueOf(timeValue))
+					}
+				} else if fieldValue.Type().String() == "gorm.DeletedAt" {
+					// Special handling for gorm.DeletedAt
 					if value != "" {
 						timeValue, err := time.Parse(time.RFC3339, value)
 						if err != nil {
@@ -331,5 +353,42 @@ func RedisHSetField(key, field string, value interface{}) error {
 		_, err = txn.Exec(ctx)
 		return err
 	}
+	return nil
+}
+
+// RedisSetJSON stores an object as JSON in Redis (faster than reflection-based HSET)
+func RedisSetJSON(key string, obj interface{}, expiration time.Duration) error {
+	if DebugEnabled {
+		SysLog(fmt.Sprintf("Redis SET JSON: key=%s, expiration=%v", key, expiration))
+	}
+	ctx := context.Background()
+
+	jsonData, err := json.Marshal(obj)
+	if err != nil {
+		return fmt.Errorf("failed to marshal object to JSON: %w", err)
+	}
+
+	return RDB.Set(ctx, key, jsonData, expiration).Err()
+}
+
+// RedisGetJSON retrieves and unmarshals a JSON object from Redis (faster than reflection-based HGETALL)
+func RedisGetJSON(key string, obj interface{}) error {
+	if DebugEnabled {
+		SysLog(fmt.Sprintf("Redis GET JSON: key=%s", key))
+	}
+	ctx := context.Background()
+	jsonData, err := RDB.Get(ctx, key).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return fmt.Errorf("key %s not found in Redis", key)
+		}
+		return fmt.Errorf("failed to get from Redis: %w", err)
+	}
+
+	err = json.Unmarshal([]byte(jsonData), obj)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal JSON: %w", err)
+	}
+
 	return nil
 }

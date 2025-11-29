@@ -68,7 +68,14 @@ func AudioHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		return newAPIError
 	}
 
-	postConsumeQuota(c, info, usage.(*dto.Usage), "")
+	// 异步执行补扣费操作，避免阻塞响应返回
+	usageCopy := usage.(*dto.Usage)
+	infoCopy := info
+	ctx := c.Copy()
+
+	common.RelayCtxGo(c.Request.Context(), func() {
+		postConsumeQuota(ctx, infoCopy, usageCopy, "")
+	})
 
 	return nil
 }

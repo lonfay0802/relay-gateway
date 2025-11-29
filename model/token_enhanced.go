@@ -9,6 +9,9 @@ import (
 	"relay-gateway/common"
 )
 
+// 本地缓存实例（1h过期）
+var tokenLocalCache = common.NewLocalCache(60 * 60 * time.Second)
+
 // TokenEnhanced 融合后的增强版 Token 结构体
 // 融合了现有 Token 和新 t_api_keys 表的设计
 type TokenEnhanced struct {
@@ -186,42 +189,109 @@ func (token *TokenEnhanced) SelectUpdate() (err error) {
 	// This can update zero values
 	now := time.Now()
 	token.LastUsedAt = &now
-	return DB.Model(token).Select("last_used_at", "status").Updates(token).Error
+	err = DB.Model(token).Select("last_used_at", "status").Updates(token).Error
+	if err != nil {
+		return err
+	}
+
+	// 同步更新本地缓存
+	if token.Key != "" {
+		hmacKey := common.GenerateHMAC(token.Key)
+		localCacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+
+		// 尝试从本地缓存获取并更新
+		if cachedValue, found := tokenLocalCache.Get(localCacheKey); found {
+			if cachedToken, ok := cachedValue.(*TokenEnhanced); ok {
+				// 更新状态和最后使用时间
+				cachedToken.Status = token.Status
+				cachedToken.LastUsedAt = token.LastUsedAt
+
+				// 重新写入缓存
+				tokenLocalCache.Set(localCacheKey, cachedToken)
+
+				keyPrefix := token.Key
+				if len(token.Key) > 10 {
+					keyPrefix = token.Key[:10] + "***"
+				}
+				common.SysLog(fmt.Sprintf("[TokenCache] Local Cache UPDATE STATUS for key=%s, status=%d", keyPrefix, token.Status))
+			}
+		}
+	}
+
+	return nil
 }
 
 // GetTokenEnhancedByKey 根据 key 获取 TokenEnhanced
 func GetTokenEnhancedByKey(key string, fromDB bool) (token *TokenEnhanced, err error) {
-	// 如果启用Redis且不强制从数据库读取，先尝试从缓存获取
-	fmt.Printf("cache_enable状态： %t\n", common.RedisEnabled)
+	keyPrefix := key
+	if len(key) > 10 {
+		keyPrefix = key[:10] + "***"
+	}
+
+	// 1. 先查本地缓存（如果不需要强制从数据库读取）
+	if !fromDB {
+		hmacKey := common.GenerateHMAC(key)
+		localCacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+
+		if cachedValue, found := tokenLocalCache.Get(localCacheKey); found {
+			// 本地缓存命中
+			if cachedToken, ok := cachedValue.(*TokenEnhanced); ok {
+				// 恢复原始key
+				cachedToken.Key = key
+				common.SysLog(fmt.Sprintf("[TokenCache] Local Cache HIT for key=%s, status=%d, remain_quota=%d", keyPrefix, cachedToken.Status, cachedToken.RemainQuota))
+				return cachedToken, nil
+			}
+		}
+		common.SysLog(fmt.Sprintf("[TokenCache] Local Cache MISS for key=%s", keyPrefix))
+	}
+	common.SysLog(fmt.Sprintf("[TokenCache] 继续调用redis key=%s", keyPrefix))
+	// 2. 查Redis缓存（如果启用且不需要强制从数据库读取）
 	if common.RedisEnabled && !fromDB {
 		hmacKey := common.GenerateHMAC(key)
 		cacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
 
 		token = &TokenEnhanced{}
-		err := common.RedisHGetObj(cacheKey, token)
+		err := common.RedisGetJSON(cacheKey, token)
 		if err == nil {
-			// 从缓存成功读取，恢复原始key
+			// 从Redis缓存成功读取，恢复原始key
 			token.Key = key
+			// 写入本地缓存
+			tokenCopy := *token
+			tokenCopy.Key = "" // 不缓存明文key
+			tokenLocalCache.Set(cacheKey, &tokenCopy)
+			common.SysLog(fmt.Sprintf("[TokenCache] Redis Cache HIT for key=%s, status=%d, remain_quota=%d", keyPrefix, token.Status, token.RemainQuota))
 			return token, nil
 		}
 		// 缓存未命中，继续从数据库读取
+		common.SysLog(fmt.Sprintf("[TokenCache] Redis Cache MISS for key=%s, error=%v", keyPrefix, err))
 	}
 
-	// 从数据库读取
+	// 3. 从数据库读取
 	token = &TokenEnhanced{}
-	err = DB.Where("key = ? AND deleted = ? AND status = ?", key, 0, 1).First(token).Error
+	err = DB.Where("key = ? AND deleted = ?", key, 0).First(token).Error
 	if err != nil {
+		common.SysLog(fmt.Sprintf("[TokenCache] DB query FAILED for key=%s, error=%v", keyPrefix, err))
 		return nil, err
 	}
 
-	// 写入Redis缓存
+	common.SysLog(fmt.Sprintf("[TokenCache] DB query SUCCESS for key=%s, status=%d, remain_quota=%d", keyPrefix, token.Status, token.RemainQuota))
+
+	// 4. 写入本地缓存
+	hmacKey := common.GenerateHMAC(key)
+	localCacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+	tokenCopy := *token
+	tokenCopy.Key = "" // 不缓存明文key
+	tokenLocalCache.Set(localCacheKey, &tokenCopy)
+
+	// 5. 写入Redis缓存
 	if common.RedisEnabled {
-		hmacKey := common.GenerateHMAC(key)
 		cacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
-		// 缓存token副本（不包含敏感key）
-		tokenCopy := *token
-		tokenCopy.Key = "" // 不缓存明文key
-		_ = common.RedisHSetObj(cacheKey, &tokenCopy, time.Duration(common.RedisKeyCacheSeconds())*time.Second)
+		cacheErr := common.RedisSetJSON(cacheKey, &tokenCopy, time.Duration(common.RedisKeyCacheSeconds())*time.Second)
+		if cacheErr != nil {
+			common.SysLog(fmt.Sprintf("[TokenCache] Redis Cache WRITE FAILED for key=%s, error=%v", keyPrefix, cacheErr))
+		} else {
+			common.SysLog(fmt.Sprintf("[TokenCache] Redis Cache WRITE SUCCESS for key=%s", keyPrefix))
+		}
 	}
 
 	return token, nil
@@ -318,21 +388,37 @@ func (token *TokenEnhanced) GetModelLimitsMap() map[string]bool {
 
 // CacheSetTokenEnhanced 将 TokenEnhanced 写入 Redis 缓存
 func CacheSetTokenEnhanced(token *TokenEnhanced) error {
-	if !common.RedisEnabled || token == nil {
+	if token == nil {
 		return nil
 	}
-	hmacKey := common.GenerateHMAC(token.Key)
-	cacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
 
 	// 缓存token副本（不包含敏感key）
 	tokenCopy := *token
+	originalKey := tokenCopy.Key
 	tokenCopy.Key = "" // 不缓存明文key
 
-	return common.RedisHSetObj(cacheKey, &tokenCopy, time.Duration(common.RedisKeyCacheSeconds())*time.Second)
+	// 同步写入本地缓存
+	if originalKey != "" {
+		LocalCacheSetTokenEnhanced(originalKey, &tokenCopy)
+	}
+
+	// 写入 Redis 缓存
+	if !common.RedisEnabled {
+		return nil
+	}
+
+	hmacKey := common.GenerateHMAC(originalKey)
+	cacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+
+	return common.RedisSetJSON(cacheKey, &tokenCopy, time.Duration(common.RedisKeyCacheSeconds())*time.Second)
 }
 
 // CacheDeleteTokenEnhanced 从 Redis 缓存删除 TokenEnhanced
 func CacheDeleteTokenEnhanced(key string) error {
+	// 同步删除本地缓存
+	LocalCacheDeleteTokenEnhanced(key)
+
+	// 删除 Redis 缓存
 	if !common.RedisEnabled {
 		return nil
 	}
@@ -343,6 +429,10 @@ func CacheDeleteTokenEnhanced(key string) error {
 
 // CacheUpdateTokenEnhancedQuota 更新 Redis 缓存中的 Token 配额
 func CacheUpdateTokenEnhancedQuota(key string, remainQuota int, usedQuota int) error {
+	// 同步更新本地缓存
+	LocalCacheUpdateTokenEnhancedQuota(key, remainQuota, usedQuota)
+
+	// 更新 Redis 缓存
 	if !common.RedisEnabled {
 		return nil
 	}
@@ -354,4 +444,64 @@ func CacheUpdateTokenEnhancedQuota(key string, remainQuota int, usedQuota int) e
 		return err
 	}
 	return common.RedisHSetField(cacheKey, "UsedQuota", fmt.Sprintf("%d", usedQuota))
+}
+
+// ========== 本地缓存辅助函数 ==========
+
+// LocalCacheSetTokenEnhanced 将 TokenEnhanced 写入本地缓存
+func LocalCacheSetTokenEnhanced(key string, token *TokenEnhanced) {
+	if token == nil {
+		return
+	}
+	hmacKey := common.GenerateHMAC(key)
+	localCacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+
+	// 缓存token副本（不包含敏感key）
+	tokenCopy := *token
+	tokenCopy.Key = "" // 不缓存明文key
+
+	tokenLocalCache.Set(localCacheKey, &tokenCopy)
+
+	keyPrefix := key
+	if len(key) > 10 {
+		keyPrefix = key[:10] + "***"
+	}
+	common.SysLog(fmt.Sprintf("[TokenCache] Local Cache SET for key=%s, status=%d, remain_quota=%d", keyPrefix, tokenCopy.Status, tokenCopy.RemainQuota))
+}
+
+// LocalCacheDeleteTokenEnhanced 从本地缓存删除 TokenEnhanced
+func LocalCacheDeleteTokenEnhanced(key string) {
+	hmacKey := common.GenerateHMAC(key)
+	localCacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+	tokenLocalCache.Delete(localCacheKey)
+
+	keyPrefix := key
+	if len(key) > 10 {
+		keyPrefix = key[:10] + "***"
+	}
+	common.SysLog(fmt.Sprintf("[TokenCache] Local Cache DELETE for key=%s", keyPrefix))
+}
+
+// LocalCacheUpdateTokenEnhancedQuota 更新本地缓存中的 Token 配额
+func LocalCacheUpdateTokenEnhancedQuota(key string, remainQuota int, usedQuota int) {
+	hmacKey := common.GenerateHMAC(key)
+	localCacheKey := fmt.Sprintf("token_enhanced:%s", hmacKey)
+
+	// 尝试从本地缓存获取
+	if cachedValue, found := tokenLocalCache.Get(localCacheKey); found {
+		if cachedToken, ok := cachedValue.(*TokenEnhanced); ok {
+			// 更新配额字段
+			cachedToken.RemainQuota = remainQuota
+			cachedToken.UsedQuota = usedQuota
+
+			// 重新写入缓存
+			tokenLocalCache.Set(localCacheKey, cachedToken)
+
+			keyPrefix := key
+			if len(key) > 10 {
+				keyPrefix = key[:10] + "***"
+			}
+			common.SysLog(fmt.Sprintf("[TokenCache] Local Cache UPDATE QUOTA for key=%s, remain_quota=%d, used_quota=%d", keyPrefix, remainQuota, usedQuota))
+		}
+	}
 }
